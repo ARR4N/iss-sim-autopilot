@@ -2,6 +2,10 @@
 // iss-sim.spacex.com.
 //
 // See: github.com/aschlosberg/iss-sim-autopilot/README
+//
+// Usage: copy and paste everything up to, but excluding, the Autopilot class
+// into the console. This defines all the helper classes. Only then can you copy
+// and paste the Autopilot class and its instantiation into the console.
 
 // numericPrefixOf assumes that the string str has a decimal prefix, which it
 // extracts and returns.
@@ -19,9 +23,10 @@ class Angles {
     static get roll() { return 'roll' }
     static get pitch() { return 'pitch' }
     static get yaw() { return 'yaw' }
+    static get all() { return [Angles.roll, Angles.pitch, Angles.yaw] }
 
     static errorIn(a) {
-        return numericPrefixOf($(`#${a}>div.error`).textContent);
+        return -numericPrefixOf($(`#${a}>div.error`).textContent);
     }
 
     static rateOf(a) {
@@ -44,15 +49,11 @@ class Angles {
 // delta. Proposal: keep the last n measurements and report every 1/n seconds
 // based on 1s ago; will also allow a rolling average.
 class Axes {
-    #last = [];
-    #rate = [];
-    #intervalID = 0;
-
     static get x() { return 'x' }
     static get y() { return 'y' }
     static get z() { return 'z' }
-
     static get all() { return [Axes.x, Axes.y, Axes.z] }
+    
     static indexOf(a) {
         switch (a) {
             case Axes.x: return 0;
@@ -60,20 +61,25 @@ class Axes {
             case Axes.z: return 2;
         };
     }
+
+    // contrib tracks the portion of the rate vector that is due to movement
+    // along each axis. This is used by rateOf() to compute a proportion of the
+    // overall vector.
+    #contrib = [];
+    #intervalID = 0;
     
     constructor() {
-        this.#rate = Axes.all.map(_ => 0);
-        const freqMs = 1000;
-
-        const self = this;
+        this.#contrib = Axes.all.map(_ => 0);
+        const freqMs = 100;
+        const last = Axes.all.map(Axes.distAlong);
+        
         this.#intervalID = setInterval(() => {
             const curr = Axes.all.map(Axes.distAlong);
-            const last = this.#last;
-            this.#rate = curr.map((c, i) => {
-                const delta = c - last[i];
+            this.#contrib = curr.map((c, ax) => {
+                const delta = c - last[ax];
+                last[ax] = c;
                 return delta / freqMs * 1000;
             });
-            this.#last = curr;
         }, freqMs);
     }
 
@@ -81,12 +87,32 @@ class Axes {
         clearInterval(this.#intervalID);
     }
 
-    static distAlong(a) {
-        return numericPrefixOf($(`#${a}-range>div.distance`).textContent);
+    static distAlong(ax) {
+        return numericPrefixOf($(`#${ax}-range>div.distance`).textContent);
     }
 
-    rateOf(a) {
-        return this.#rate[Axes.indexOf(a)];
+    // rateOf performs computes the part of the rate HUD measurement that is
+    // attributable to the specified axis. The contributions of each axis are
+    // updated at a different rate to the value displayed in the HUD.
+    rateOf(ax) {
+        const i = Axes.indexOf(ax);
+        const contrib = this.#contrib[i];
+        const sign = contrib > 0 ? 1 : -1;
+        
+        const sumSq = this.#contrib.reduce((acc, curr) => acc + curr**2, 0);
+        if (sumSq == 0){
+            return 0;
+        }
+        const prop = contrib**2 / sumSq;
+        return sign * Math.sqrt(Math.abs(Axes.rate * prop));
+    }
+
+    static get rate() {
+        return numericPrefixOf($('#rate>div.rate').textContent);
+    }
+
+    static get range() {
+        return numericPrefixOf($('#range>div.rate').textContent);
     }
 }
 
@@ -104,12 +130,12 @@ class Controls {
     constructor() {
         const angleLabels = {
             'roll': ['left', 'right'],
-            'pitch': ['down', 'up'],
+            'pitch': ['up', 'down'],
             'yaw': ['left', 'right'],
         };
     
         const txLabels = {
-            'x': ['backward', 'forward'],
+            'x': ['forward', 'backward'],
             'y': ['left', 'right'],
             'z': ['down', 'up'],
         };
@@ -131,14 +157,99 @@ class Controls {
 
     static get inc() { return 1 }
     static get dec() { return 0 }
+    static directionString(dir) {
+        return dir == Controls.inc ? 'increase' : 'decrease';
+    }
 
     change(angleOrTranslation, dir) {
         this.#buttons[angleOrTranslation][dir].click();
     }
 }
 
-// Autopilot starts here.
-(() => {
-    console.info('Initiate autopilot');
-    // TODO
-})();
+// Autopilot implements a rudimentary system that aims for a velocity
+// proportional to the negative of the error, which results in an exponential
+// decay.
+class Autopilot {
+    #axes;
+    #intervalID;
+    
+    constructor() {
+        const ctrls = new Controls();
+        this.#axes = new Axes();
+
+        // Only start translation once the angles are within tolerance.
+        var translate = false;
+        const tolerance = 0.2;
+
+        const verbosity = 0;
+        const log = (lvl, msg) => {
+            if (lvl <= verbosity) {
+                console.info(msg);
+            }
+        }
+
+        this.#intervalID = setInterval(() => {
+            Angles.all.forEach(a => {
+                const err = Angles.errorIn(a);
+                const rate = Angles.rateOf(a);
+                const goal = -err / 10;
+                const delta = goal - rate;
+                log(2, `${a}: ${err}° at ${rate}°/s; goal: ${goal}°/s requires delta of ${delta}`);
+
+                if (delta == 0) {
+                    return;
+                }
+
+                const dir = delta > 0 ? Controls.inc : Controls.dec;
+                log(2, `${a} => ${Controls.directionString(dir)}`);
+                ctrls.change(a, dir);
+            });
+
+            // Once angles are within tolerance then the axes are suffciciently
+            // representative to use translation controls without having to
+            // adjust with trig.
+            const anglesReady = Angles.all.map(Angles.errorIn)
+                                            .map(e => Math.abs(e) < tolerance)
+                                            .reduce((acc, curr) => acc && curr, true);
+
+            // If we've already started piloting along the translation axes then
+            // keep doing it even if the angles fall outside tolerance again.
+            //
+            // TODO: change this strategy to a safer one of moving back to zero
+            // translation until angles are ready again.
+            translate = translate || anglesReady;
+            if (!translate) {
+                return;
+            }
+
+            Axes.all.forEach(a => {
+                const err = Axes.distAlong(a);
+                const rate = this.#axes.rateOf(a);
+                const dampen = a == Axes.x && err < 5 ? 500 : 200;
+                const goal = -err / dampen;
+                const delta = goal - rate;
+                log(2, `${a}: ${err}° at ${rate}°/s; goal: ${goal}°/s requires delta of ${delta}`);
+
+                if (delta == 0) {
+                    return;
+                }
+
+                // TODO: this mechanism overshoots so requires improved
+                // precision. The goal velocity results in an exponentially
+                // decaying range, but it's only achieved with significant
+                // dampening.
+                const dir = delta > 0 ? Controls.inc : Controls.dec;
+                log(2, `${a} => ${Controls.directionString(dir)}`);
+                ctrls.change(a, dir);
+            });
+
+        }, 20);
+    }
+
+    stop() {
+        clearInterval(this.#intervalID);
+        this.#axes.stop();
+    }
+}
+
+a = new Autopilot();
