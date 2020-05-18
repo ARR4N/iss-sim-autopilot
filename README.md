@@ -16,7 +16,7 @@ classes and the second, the autopilot—they must be split to avoid JavaScripts
 "temporal dead zone". Handling of intro and success/failure screens is low
 priority.
 
-## Caveats
+## Known Issues
 
 * It comes in too fast along the x axis!
 * Velocity relative to the ISS isn't provided in the HUD so it's calculated.

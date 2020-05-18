@@ -166,6 +166,12 @@ class Controls {
     }
 }
 
+/*
+ * ###############################
+ * First copy everything above here into the console, then everything below.
+ * ###############################
+ */
+
 // Autopilot implements a rudimentary system that aims for a velocity
 // proportional to the negative of the error, which results in an exponential
 // decay.
